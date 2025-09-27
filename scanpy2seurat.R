@@ -2,9 +2,13 @@ library(reticulate)
 library(anndata)
 library(Seurat)
 library(Matrix)
+library(optparse)
+
+#!/usr/bin/env Rscript
 
 py_require(c("anndata"))
 
+# ---- Functions ----
 dgR_flip <- function(dgr){
   #' Helper function that converts scanpy/anndata dgRs to Seurat dgCs
   #' 
@@ -17,8 +21,32 @@ dgR_flip <- function(dgr){
   return(as(as(Matrix::t(dgr), "CsparseMatrix"), "dgCMatrix"))
 }
 
+
+GetScanpyMtx <- function(adata,
+                         layer = NULL){
+  #' Read information from anndata and flip
+  #' 
+  #' @param adata annData object, or path to it
+  #' @param layer layer containing counts. Default: Get X.
+  
+  if (is.character(adata)) {
+    adata <- read_h5ad(adata)
+  }
+  
+  # Get counts and transform to match SeuratObject conventions
+  if( is.null(layer) || (layer == "X") ){
+    mtx <- dgR_flip(adata$X)
+  } else if (startsWith(layer, "raw")){
+    mtx <- dgR_flip(adata$raw$X)
+  } else {
+    mtx <- dgR_flip(adata$layers[layer])
+  }
+  return(mtx)
+}
+
 Scanpy2Seurat <- function(h5ad,
                           counts = "X",
+                          data_counts = "raw",
                           idents = "sample",
                           min_obs= 500,
                           min_var= 300,
@@ -37,23 +65,13 @@ Scanpy2Seurat <- function(h5ad,
 #' @param project Project name for the final SeuratObject
 #' @param export Save as RDS
   
-  if(is.environment(h5ad)){
-    adata <- h5ad
-  } else if (is.character(h5ad)) {
+  # Unpack adata information
+  if (is.character(h5ad)) {
     adata <- read_h5ad(h5ad)
-  } else {
-    print("Unable to read h5ad file. Please try again.")
-    quit()
   }
   
-  # Get counts and transform to match SeuratObject conventions
-  if( is.null(counts) || (counts == "X") ){
-    mtx <- dgR_flip(adata$X)
-    X <- NULL
-  } else {
-    mtx <- dgR_flip(adata$layers[counts])
-    X <- dgR_flip(adata$X)
-  }
+  mtx <- GetScanpyMatrix(adata, counts)
+  X <- GetScanpyMatrix(adata, data_counts)
   
   # Save obs and var matrices
   s_obj <- CreateSeuratObject(counts = mtx,
@@ -165,3 +183,55 @@ Seurat2Scanpy <- function(seurat_object,
   
   return(adata)
 }
+
+Scanpy2Loupe <- function(adata,
+                         counts="X",
+                         subset_column = NA,
+                         clusters = c("leiden", "annot"),
+                         projections = c("X_umap", "X_pca"),
+                         out_dir = ".",
+                         name = "scanpy"){
+  #' @param adata AnnData object, or path to itdescription
+  #' @param counts Layer containing counts, to be passed to Loupe Browser
+  #' @param subset_column Break object across this column in .obs
+  #' @param clusters Groups in .obs to pass as colors to Loupe Browser
+  #' @param projections Projections in .obsm to pass to Loupe Browser
+  #' @param out_dir Where to save cloupe object
+  #' @param name Name cloupe will be saved under
+  
+  # Read Data
+  if (is.character(adata)) {
+    adata <- read_h5ad(adata)
+  }
+  
+  if(is.na(subset_column)){
+    mtx <- GetScanpyMtx(adata, counts)
+    create_loupe(
+      mtx,
+      clusters = adata$obs[clusters],
+      projections = lapply(adata$obsm[projections], function(x) x[,1:2]),
+      output_dir = out_dir,
+      output_name = name,
+      feature_ids = rownames(adata$var),
+      executable_path = NULL,
+      force = FALSE,
+      seurat_obj_version = "scanpy"
+    )
+  } else {
+    subset_level = levels(adata$obs[, subset_column])
+    
+    for(lvl in subset_level){
+      ad1 <- adata[adata$obs[, subset_column] == lvl]
+      Scanpy2Loupe(ad1, 
+                   counts=counts,
+                   clusters=clusters, 
+                   projections=projections,
+                   out_dir = out_dir,
+                   name=paste(name, lvl, sep="_"))
+    }
+  }
+}
+
+
+
+# ---- Command Line ----
